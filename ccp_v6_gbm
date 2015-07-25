@@ -1,3 +1,7 @@
+library("gbm")
+library("glmnet")
+library("rpart")
+
 ### Kaggle Scripts: Ponpare Coupon Purchase Prediction ###
 ### Author: Subhajit Mandal ###
 
@@ -24,35 +28,67 @@ cpchar <- cplte[,c("COUPON_ID_hash","USER_ID_hash",
 
 train <- rbind(train,cpchar)
 #NA imputation
-train[is.na(train)] <- 1
-#feature engineering
-train$DISCOUNT_PRICE <- 1/log10(train$DISCOUNT_PRICE)
-#convert the factors to columns of 0's and 1's
-train <- cbind(train[,c(1,2)],model.matrix(~ -1 + .,train[,-c(1,2)],
-                                                    contrasts.arg=lapply(train[,names(which(sapply(train[,-c(1,2)], is.factor)==TRUE))], contrasts, contrasts=FALSE)))
+# train[is.na(train)] <- 1
 
-#separate the test from train
-test <- train[train$USER_ID_hash=="dummyuser",]
-test <- test[,-2]
-train <- train[train$USER_ID_hash!="dummyuser",]
+# print("first linear model")
+# OLS_model <- lm(USER_ID_hash ~ ., data = train)
 
-#data frame of user characteristics
-uchar <- aggregate(.~USER_ID_hash, data=train[,-1],FUN=mean)
-uchar$DISCOUNT_PRICE <- 1
+print("Started Training GBM")
 
-#Weight Matrix: GENRE_NAME DISCOUNT_PRICE USABLE_DATE_ ken_name small_area_name
-require(Matrix)
-W <- as.matrix(Diagonal(x=c(rep(1,13), rep(1,1), rep(0,9), rep(1,47), rep(0.01,55))))
+# GBM is easier to process as a data matrix
+response_column <- which(colnames(train) == "USER_ID_hash")
 
-#calculation of cosine similairties of users and coupons
-score = as.matrix(uchar[,2:ncol(uchar)]) %*% W %*% t(as.matrix(test[,2:ncol(test)]))
-#order the list of coupons according to similairties and take only first 10 coupons
+trainy <- train$USER_ID_hash
+gbm_formula <- as.formula(paste0("USER_ID_hash ~ ", paste(colnames(train[, -response_column]),collapse = " + ")))
+gbm_model <- gbm(gbm_formula, train, distribution = "bernoulli", n.trees = 100,bag.fraction = 0.75, cv.folds = 5, interaction.depth = 3)
+print("Finished Training GBM")
+
+# For glmnet we make a copy of our dataframe into a matrix
+trainx_dm <- data.matrix(train[, -response_column])
+
+# print("Started fitting LASSO")
+
+# lasso_model <- cv.glmnet(x = trainx_dm, y = train$USER_ID_hash, alpha = 1)
+# print("Finished fitting LASSO")
+
+# print("Started fitting RIDGE")
+
+# ridge_model <- cv.glmnet(x = trainx_dm, y = train$USER_ID_hash, alpha = 0)
+# print("Finished fitting RIDGE")
+
+dtree_model <- rpart(USER_ID_hash ~ ., train)
+gbm_perf <- gbm.perf(gbm_model, method = "cv")
+
+# predictions_ols <- predict(OLS_model, testdf[, -response_column])
+
+predictions_gbm <- predict(gbm_model, newdata = test[, -response_column],n.trees = gbm_perf, type = "response")
+
+testx_dm <- data.matrix(test[, -response_column])
+# predictions_lasso <- predict(lasso_model, newx = testx_dm, type = "response", s = "lambda.min")[, 1]
+# predictions_ridge <- predict(ridge_model, newx = testx_dm, type = "response", s = "lambda.min")[, 1]
+# predictions_dtree <- predict(dtree_model, testdf[, -response_column])
+
 uchar$PURCHASED_COUPONS <- do.call(rbind, lapply(1:nrow(uchar),FUN=function(i){
   purchased_cp <- paste(test$COUPON_ID_hash[order(score[i,], decreasing = TRUE)][1:10],collapse=" ")
   return(purchased_cp)
 }))
 
-#make submission
-submission <- merge(ulist, uchar, all.x=TRUE)
-submission <- submission[,c("USER_ID_hash","PURCHASED_COUPONS")]
-write.csv(submission, file="cpc_v6.csv", row.names=FALSE)
+print("OLS: Area under the ROC curve:")
+
+auc(test$USER_ID_hash, predictions_ols)
+
+print("Rdige: Area under the ROC curve:")
+
+auc(test$USER_ID_hash, predictions_ridge)
+
+print("LASSO: Area under the ROC curve:")
+
+auc(testdf$USER_ID_hash, predictions_lasso)
+
+print("GBM: Area under the ROC curve:")
+
+auc(testdf$USER_ID_hash, predictions_gbm)
+
+print("Decision Tree: Area under the ROC curve:")
+
+auc(testdf$USER_ID_hash, predictions_dtree)
